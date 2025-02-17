@@ -1,4 +1,67 @@
 #!/bin/bash
+
+# Function to check if a URL is valid
+check_url() {
+    local url=$1
+    if [[ ! $url =~ ^https?:// ]]; then
+        echo "Error: Host must start with http:// or https://"
+        exit 1
+    fi
+}
+
+# Function to check if file exists and is readable
+check_file() {
+    local file=$1
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+        echo "Error: File '$file' does not exist or is not readable"
+        exit 1
+    fi
+
+    # Check file size (max 500MB)
+    local size=$(stat -f%z "$file")
+    if [ $size -gt 524288000 ]; then
+        echo "Error: File size exceeds 500MB limit"
+        exit 1
+    fi
+}
+
+# Function to handle the upload
+do_upload() {
+    local curl_command="$1"
+    local max_retries=3
+    local retry_count=0
+    local wait_time=5
+
+    while [ $retry_count -lt $max_retries ]; do
+        echo "Attempt $((retry_count + 1)) of $max_retries..."
+        
+        # Execute curl command and capture both response and status code
+        local response=$(eval "$curl_command -w '\n%{http_code}'")
+        local status_code=$(echo "$response" | tail -n1)
+        local body=$(echo "$response" | sed '$d')
+
+        if [ "$status_code" -eq 200 ] || [ "$status_code" -eq 201 ]; then
+            echo "Upload successful!"
+            echo "$body"
+            return 0
+        else
+            echo "Upload failed with status code: $status_code"
+            echo "Response: $body"
+            
+            if [ $retry_count -lt $((max_retries-1)) ]; then
+                echo "Retrying in $wait_time seconds..."
+                sleep $wait_time
+                wait_time=$((wait_time * 2))
+            fi
+        fi
+        
+        retry_count=$((retry_count + 1))
+    done
+
+    echo "Failed to upload after $max_retries attempts"
+    return 1
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --host*|-H*)
@@ -47,42 +110,48 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-if [ -z "$HOST" ]
-then
-	echo "Invalid host"
-	exit 1
+# Validate required parameters
+if [ -z "$HOST" ]; then
+    echo "Error: Host is required"
+    exit 1
 fi
 
-if [ -z "$TOKEN" ]
-then
-	echo "Invalid TOKEN"
-	exit 1
+if [ -z "$TOKEN" ]; then
+    echo "Error: Token is required"
+    exit 1
 fi
 
-if [ -z "$FILE" ]
-then
-	echo "Invalid file"
-	exit 1
+if [ -z "$FILE" ]; then
+    echo "Error: File is required"
+    exit 1
 fi
 
-curl_command="curl -m 300 -s -L -X POST "$HOST/api/apps/upload" -F token=$TOKEN -F file=@$FILE"
+# Check URL format
+check_url "$HOST"
 
-if [ -n "$CHANNEL_KEY" ]
-then
-  curl_command="$curl_command -F channel_key=$CHANNEL_KEY"
+# Check if file exists and is readable
+check_file "$FILE"
+
+# Prepare curl command with proper escaping
+curl_command="curl -m 300 -s -L -X POST \"${HOST}/api/apps/upload\" \
+    -F \"token=${TOKEN}\" \
+    -F \"file=@${FILE}\" \
+    --progress-bar"
+
+if [ -n "$CHANNEL_KEY" ]; then
+    curl_command="$curl_command -F \"channel_key=${CHANNEL_KEY}\""
 fi
 
-
-if [ -n "$CHANGE_LOG" ]
-then
-  log=`cat $CHANGE_LOG`
-  if [ -n "$log" ]
-  then
-    curl_command="$curl_command -F changelog=\"$log\""
-  fi
+if [ -n "$CHANGE_LOG" ]; then
+    if [ -f "$CHANGE_LOG" ] && [ -r "$CHANGE_LOG" ]; then
+        log=$(cat "$CHANGE_LOG")
+        if [ -n "$log" ]; then
+            curl_command="$curl_command -F \"changelog=${log}\""
+        fi
+    else
+        echo "Warning: Changelog file not found or not readable: $CHANGE_LOG"
+    fi
 fi
 
-echo "Uploading the file..."
-
-response=$(eval "$curl_command")
-echo "$response"
+echo "Starting upload process..."
+do_upload "$curl_command"
